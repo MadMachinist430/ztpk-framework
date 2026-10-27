@@ -1,0 +1,13 @@
+node_modules/
+archive/
+*.bak
+*.backup*
+*.log
+.env
+.env.*
+.DS_Store
+Thumbs.db
+coverage/
+dist/
+tmp/
+cache/
