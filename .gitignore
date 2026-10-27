@@ -1,13 +1,21 @@
-node_modules/
-archive/
-*.bak
-*.backup*
-*.log
+# Environment / secrets
 .env
 .env.*
+
+# Logs / temp
+*.log
+*.tmp
+*.bak
+*.backup*
+
+# OS / editor
 .DS_Store
 Thumbs.db
-coverage/
-dist/
-tmp/
-cache/
+.vscode/
+.idea/
+
+# Accidental artifact files
+PYEOF
+if
+for
+import
