@@ -1,0 +1,449 @@
+const http = require('http');
+const WebSocket = require('ws');
+const url = require('url');
+const crypto = require('crypto');
+
+// Load environment
+const SOC_ID = process.env.SOC_ID || 'SOC-UNKNOWN';
+const DEVICE_ID = process.env.DEVICE_ID || 'UNKNOWN';
+const PASSPHRASE = process.env.APP_PASSPHRASE || 'CHANGE_ME';
+
+// Deterministic AI Core
+class DeterministicAI {
+  constructor() {
+    this.memory = new Map();
+    this.integrityHash = crypto.createHash('sha256')
+      .update(SOC_ID + DEVICE_ID + PASSPHRASE)
+      .digest('hex');
+  }
+
+  deterministicHash(input, salt = '') {
+    return crypto.createHash('sha256')
+      .update(this.integrityHash + input + salt)
+      .digest('hex')
+      .substring(0, 16);
+  }
+
+  generateResponse(input, context = {}) {
+    const inputHash = this.deterministicHash(input);
+    const seed = parseInt(inputHash, 16);
+
+    // Pattern matching
+    const patterns = {
+      'hello|hi|hey': () => 'Greetings. I am Z-TPK AI operating under sovereign logic.',
+      'bye|goodbye': () => 'Session preserved. State maintained.',
+      'who are you|what are you': () => `I am ${SOC_ID} on ${DEVICE_ID}. Deterministic AI core.`,
+      'help': () => 'Available commands: hello, help, status, info',
+      'status|info': () => `System: ${SOC_ID} | Device: ${DEVICE_ID} | Uptime: ${process.uptime()}s`
+    };
+
+    for (const [pattern, responseFn] of Object.entries(patterns)) {
+      if (new RegExp(pattern, 'i').test(input)) {
+        return responseFn();
+      }
+    }
+
+    // Deterministic responses based on hash
+    const responses = [
+      `ANALYSIS [${inputHash.substring(0,4)}]: Input processed via deterministic logic.`,
+      `QUERY: Confirm intent for: ${input}`,
+      `STATEMENT: ${input.toUpperCase()} - ACKNOWLEDGED`,
+      `CLARIFICATION: Please elaborate on: ${input}`,
+      `RESPONSE: ${input} - Processed with integrity hash ${inputHash}`
+    ];
+
+    return responses[seed % responses.length];
+  }
+}
+
+// Middleware Injection System
+class MiddlewareInjector {
+  constructor() {
+    this.middlewareFunctions = new Map();
+    this.externalConnections = new Map();
+  }
+
+  registerMiddleware(name, fn) {
+    this.middlewareFunctions.set(name, fn);
+  }
+
+  async processThroughMiddleware(message, context = {}) {
+    let processed = { ...message };
+    for (const [name, fn] of this.middlewareFunctions) {
+      try {
+        const result = await fn(processed, context);
+        if (result) processed = { ...processed, ...result };
+      } catch (err) {
+        console.error(`[MIDDLEWARE] Error in ${name}:`, err.message);
+      }
+    }
+    return processed;
+  }
+
+  async connectExternal(sessionId, connectionParams) {
+    this.externalConnections.set(sessionId, {
+      id: sessionId,
+      params: connectionParams,
+      connectedAt: new Date(),
+      status: 'connected'
+    });
+    return { success: true, sessionId };
+  }
+
+  async forwardToExternal(sessionId, message) {
+    const connection = this.externalConnections.get(sessionId);
+    if (connection) {
+      console.log(`[NETWORK] Forwarding to ${sessionId}:`, message);
+      return { success: true, sessionId, message };
+    }
+    return { success: false, error: 'Session not connected' };
+  }
+}
+
+// Networking Layer
+class NetworkManager {
+  constructor() {
+    this.peers = new Map();
+    this.ai = new DeterministicAI();
+    this.middleware = new MiddlewareInjector();
+  }
+
+  addPeer(peerId, address) {
+    this.peers.set(peerId, { address, connectedAt: new Date() });
+  }
+
+  broadcast(message, excludePeer = null) {
+    const broadcastMessage = {
+      messageId: crypto.randomBytes(8).toString('hex'),
+      timestamp: new Date().toISOString(),
+      sender: DEVICE_ID,
+      socId: SOC_ID,
+      payload: message,
+      integrityHash: this.ai.deterministicHash(JSON.stringify(message))
+    };
+
+    this.peers.forEach((peer, peerId) => {
+      if (peerId !== excludePeer) {
+        console.log(`[NETWORK] Broadcasting to ${peerId}`);
+      }
+    });
+
+    return broadcastMessage;
+  }
+
+  async processIncoming(message, sourcePeer = null) {
+    if (message.integrityHash) {
+      const computedHash = this.ai.deterministicHash(JSON.stringify(message.payload));
+      if (computedHash !== message.integrityHash) {
+        console.warn(`[NETWORK] Integrity check failed from ${sourcePeer}`);
+        return null;
+      }
+    }
+
+    const processed = await this.middleware.processThroughMiddleware(message, { sourcePeer });
+    if (processed.generateResponse !== false) {
+      const response = this.ai.generateResponse(
+        typeof processed.payload === 'string' ? processed.payload : JSON.stringify(processed.payload),
+        { sessionId: sourcePeer || 'local' }
+      );
+      return { ...processed, aiResponse: response };
+    }
+    return processed;
+  }
+}
+
+// Initialize
+const networkManager = new NetworkManager();
+const aiCore = networkManager.ai;
+const middleware = networkManager.middleware;
+
+// Register default middleware
+middleware.registerMiddleware('aiResponseGenerator', async (message) => {
+  if (message.payload && typeof message.payload === 'string') {
+    const response = aiCore.generateResponse(message.payload);
+    return { aiResponse: response };
+  }
+  return null;
+});
+
+// Create HTTP server
+const server = http.createServer((req, res) => {
+  const reqUrl = url.parse(req.url, true);
+
+  // API: Status
+  if (reqUrl.pathname === '/api/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'ok',
+      socId: SOC_ID,
+      deviceId: DEVICE_ID,
+      uptime: process.uptime(),
+      peers: networkManager.peers.size
+    }));
+    return;
+  }
+
+  // API: AI Response
+  if (reqUrl.pathname === '/api/ai' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const response = aiCore.generateResponse(data.input, data.context || {});
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          response,
+          integrityHash: aiCore.deterministicHash(data.input)
+        }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid input' }));
+      }
+    });
+    return;
+  }
+
+  // API: Middleware
+  if (reqUrl.pathname.startsWith('/api/middleware/')) {
+    const parts = reqUrl.pathname.split('/');
+    const action = parts[3];
+
+    if (action === 'connect' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        try {
+          const data = JSON.parse(body);
+          const result = await middleware.connectExternal(data.sessionId, data.params);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Connection failed' }));
+        }
+      });
+      return;
+    }
+
+    if (action === 'forward' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        try {
+          const data = JSON.parse(body);
+          const result = await middleware.forwardToExternal(data.sessionId, data.message);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Forward failed' }));
+        }
+      });
+      return;
+    }
+  }
+
+  // API: Network
+  if (reqUrl.pathname.startsWith('/api/network/')) {
+    const parts = reqUrl.pathname.split('/');
+    const action = parts[3];
+
+    if (action === 'peers' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        peers: Array.from(networkManager.peers.entries()),
+        count: networkManager.peers.size
+      }));
+      return;
+    }
+
+    if (action === 'broadcast' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          const result = networkManager.broadcast(data.message);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Broadcast failed' }));
+        }
+      });
+      return;
+    }
+  }
+
+  // Web interface
+  if (reqUrl.pathname === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Z-TPK AI Chat</title>
+    <style>
+        body { font-family: monospace; background: #000; color: #0f0; margin: 0; padding: 20px; }
+        #messages { height: 60vh; overflow-y: scroll; border: 1px solid #0f0; padding: 10px; margin-bottom: 10px; background: #111; }
+        input { width: 70%; padding: 8px; background: #111; color: #0f0; border: 1px solid #0f0; }
+        button { padding: 8px 15px; background: #0f0; color: #000; border: none; cursor: pointer; }
+        .message { margin: 5px 0; padding: 5px; border-bottom: 1px solid #030; }
+        .user { color: #0f0; }
+        .ai { color: #0af; }
+        .system { color: #f80; }
+        .integrity { color: #08f; font-size: 0.8em; }
+    </style>
+</head>
+<body>
+    <h1>Z-TPK Decentralized AI Chat</h1>
+    <div>SOC: ${SOC_ID} | Device: ${DEVICE_ID}</div>
+    <div id="messages"></div>
+    <input type="text" id="messageInput" placeholder="Type your message..." />
+    <button onclick="sendMessage()">Send</button>
+    <button onclick="askAI()">Ask AI</button>
+    <script>
+        const ws = new WebSocket('ws://' + window.location.host);
+        const messages = document.getElementById('messages');
+        const input = document.getElementById('messageInput');
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            const div = document.createElement('div');
+            div.className = 'message ' + (data.sender === '${DEVICE_ID}' ? 'user' : data.aiResponse ? 'ai' : 'system');
+            let content = '<strong>' + (data.sender || 'SYSTEM') + ':</strong> ' + (data.text || data.payload || JSON.stringify(data));
+            if (data.aiResponse) content += '<div style="margin-top:5px; padding-left:10px;"><em>AI: ' + data.aiResponse + '</em></div>';
+            div.innerHTML = content;
+            messages.appendChild(div);
+            messages.scrollTop = messages.scrollHeight;
+        };
+
+        function sendMessage() {
+            const text = input.value.trim();
+            if (text) {
+                ws.send(JSON.stringify({ text: text, sender: '${DEVICE_ID}' }));
+                input.value = '';
+            }
+        }
+
+        function askAI() {
+            const text = input.value.trim();
+            if (text) {
+                fetch('/api/ai', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ input: text })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    const div = document.createElement('div');
+                    div.className = 'message ai';
+                    div.innerHTML = '<strong>AI:</strong> ' + data.response + '<div class="integrity">Hash: ' + data.integrityHash.substring(0,8) + '</div>';
+                    messages.appendChild(div);
+                    messages.scrollTop = messages.scrollHeight;
+                });
+            }
+        }
+
+        input.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+    </script>
+</body>
+</html>
+    `);
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('Z-TPK AI Server - Use / for chat or /api/status');
+});
+
+// WebSocket server
+const wss = new WebSocket.Server({ server });
+const messageHistory = [];
+
+wss.on('connection', (ws, req) => {
+  const clientIp = req.socket.remoteAddress;
+  const clientId = req.headers['x-device-id'] || 'ANON-' + Math.random().toString(36).substring(2, 8);
+
+  console.log(`[CHAT] New connection: ${clientId}`);
+
+  ws.send(JSON.stringify({
+    text: `Connected to Z-TPK AI (${SOC_ID})`,
+    sender: 'SYSTEM',
+    integrityHash: aiCore.deterministicHash('WELCOME')
+  }));
+
+  ws.on('message', async (message) => {
+    try {
+      const data = JSON.parse(message);
+      const msg = {
+        text: data.text,
+        sender: data.sender || clientId,
+        timestamp: new Date().toISOString()
+      };
+
+      // Generate AI response
+      const aiResponse = aiCore.generateResponse(msg.text, { sessionId: clientId });
+
+      // Add to message
+      msg.aiResponse = aiResponse;
+      msg.integrityHash = aiCore.deterministicHash(msg.text + msg.sender);
+
+      // Store in history
+      messageHistory.push(msg);
+      if (messageHistory.length > 100) messageHistory.shift();
+
+      // Broadcast to all clients
+      wss.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify(msg));
+        }
+      });
+
+      // Broadcast to network peers
+      networkManager.broadcast(msg, clientId);
+
+    } catch (err) {
+      console.error('[CHAT] Error:', err.message);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log(`[CHAT] Connection closed: ${clientId}`);
+  });
+});
+
+// Start server
+const PORT = 3000;
+server.listen(PORT, () => {
+  console.log('==================================================');
+  console.log('  Z-TPK Decentralized AI Chat Engine - ACTIVE');
+  console.log('==================================================');
+  console.log(`  SOC ID:     ${SOC_ID}`);
+  console.log(`  Device ID:  ${DEVICE_ID}`);
+  console.log(`  Passphrase: ${PASSPHRASE.substring(0, 8)}...`);
+  console.log('==================================================');
+  console.log(`  HTTP:  http://localhost:${PORT}`);
+  console.log(`  WS:    ws://localhost:${PORT}`);
+  console.log('==================================================');
+  console.log('  Features:');
+  console.log('    - Deterministic AI responses');
+  console.log('    - WebSocket chat');
+  console.log('    - Middleware injection');
+  console.log('    - Network broadcasting');
+  console.log('==================================================');
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n[SERVER] Shutting down...');
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.close(1001, 'Server shutting down');
+    }
+  });
+  server.close(() => process.exit(0));
+});

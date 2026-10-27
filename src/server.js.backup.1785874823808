@@ -1,0 +1,603 @@
+const http = require('http');
+const WebSocket = require('ws');
+const url = require('url');
+const crypto = require('crypto');
+
+const SOC_ID = process.env.SOC_ID || 'SOC-' + Date.now().toString(36).toUpperCase().substring(0, 8) + '-01';
+const DEVICE_ID = process.env.DEVICE_ID || 'DEV-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+const PASSPHRASE = process.env.APP_PASSPHRASE || 'ZTPK-' + crypto.randomBytes(8).toString('hex');
+const PORT = process.env.PORT || 3000;
+const P2P_PORT = process.env.P2P_PORT || 9000;
+
+process.env.SOC_ID = SOC_ID;
+process.env.DEVICE_ID = DEVICE_ID;
+process.env.APP_PASSPHRASE = PASSPHRASE;
+
+const cryptoVault = require('./storage/crypto');
+const SecureLedger = require('./storage/ledger');
+const AIEngine = require('./core/ai-engine');
+const PeerManager = require('./network/peer-manager');
+const LearningEngine = require('./learning/learning-engine');
+const TruthOssifier = require('./integrity/truth-ossifier');
+const AlertService = require('./integrity/alert-service');
+const WallOfShame = require('./integrity/wall-of-shame');
+const GitHubSync = require('./integrity/github-sync');
+const WebScraper = require('./core/web-scraper');
+
+const ledger = new SecureLedger('ztpk-ledger.chain');
+const learning = new LearningEngine();
+const ai = new AIEngine({ socId: SOC_ID, deviceId: DEVICE_ID, passphrase: PASSPHRASE, learningEngine: learning });
+const network = new PeerManager({ port: P2P_PORT, deviceId: DEVICE_ID, socId: SOC_ID, passphrase: PASSPHRASE });
+const ossifier = new TruthOssifier(0.90);
+const alerts = new AlertService({ socId: SOC_ID, deviceId: DEVICE_ID });
+const shame = new WallOfShame();
+const github = new GitHubSync();
+const scraper = new WebScraper();
+
+const messageHistory = [];
+const MAX_HISTORY = 100;
+
+console.log('[INTEGRITY] Truth Ossifier active | Alerts: ' + (alerts.enabled ? 'ENABLED' : 'disabled') + ' | GitHub: ' + (github.enabled ? 'ENABLED' : 'disabled'));
+
+network.onMessage((type, payload, senderId) => {
+  if (type === 'gossip' && payload.text) {
+    const netMsg = {
+      text: payload.text,
+      sender: senderId,
+      source: 'network',
+      aiResponse: payload.aiResponse || null,
+      timestamp: new Date().toISOString(),
+      integrityHash: payload.integrityHash || 'network'
+    };
+    messageHistory.push(netMsg);
+    if (messageHistory.length > MAX_HISTORY) messageHistory.shift();
+    broadcastWS(netMsg);
+  }
+});
+network.start();
+
+function broadcastWS(msg) {
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify(msg));
+    }
+  });
+}
+
+function htmlEscape(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+const server = http.createServer((req, res) => {
+  const reqUrl = url.parse(req.url, true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/status') {
+    const verify = ledger.verifyChain();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'ok',
+      socId: SOC_ID,
+      deviceId: DEVICE_ID,
+      displayId: '****' + DEVICE_ID.slice(-4),
+      uptime: process.uptime(),
+      peers: network.getPeers().length,
+      discovered: network.getDiscoveredPeers().length,
+      ledgerEntries: ledger.chain.length,
+      ledgerValid: verify.valid,
+      integrityStats: ossifier.getStats(),
+      shameEntries: shame.getStats().total
+    }));
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/ai' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const result = ai.generateResponse(data.input, data.context || {});
+        ledger.addEntry({ type: 'api_ai', input: data.input, hash: result.integrityHash });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Invalid input' }));
+      }
+    });
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/research' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const data = JSON.parse(body);
+        const result = await scraper.research(data.query);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'Research failed', detail: err.message }));
+      }
+    });
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/integrity/register' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const result = ossifier.registerTruth(data.truthId, data.text, data.source || 'api', data.meta || {});
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Invalid register data' }));
+      }
+    });
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/integrity/check' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const result = ossifier.checkAlteration(data.truthId, data.text);
+        if (result.isAlteration) {
+          const entry = shame.addEntry(result);
+          alerts.sendAlterationAlert(entry);
+          if (github.enabled) github.syncEntry(entry);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Invalid check data' }));
+      }
+    });
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/integrity/report' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        if (!ossifier.getTruth(data.postId)) {
+          ossifier.registerTruth(data.postId, data.original, data.platform || 'tampermonkey', { url: data.url, user: data.user });
+        }
+        const result = ossifier.checkAlteration(data.postId, data.altered);
+        if (result.isAlteration) {
+          const entry = shame.addEntry({
+            id: result.id,
+            isAlteration: result.isAlteration,
+            original: result.original,
+            altered: result.altered,
+            similarity: result.similarity,
+            changes: result.changes,
+            changeCount: result.changeCount,
+            severity: result.severity,
+            timestamp: result.timestamp,
+            originalHash: result.originalHash,
+            alteredHash: result.alteredHash,
+            platform: data.platform,
+            user: data.user,
+            url: data.url,
+            socId: SOC_ID
+          });
+          alerts.sendAlterationAlert(entry);
+          if (github.enabled) github.syncEntry(entry);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ received: true, alteration: result.isAlteration, severity: result.severity }));
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Invalid report' }));
+      }
+    });
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/ledger' && req.method === 'GET') {
+    const verify = ledger.verifyChain();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      valid: verify.valid,
+      totalEntries: ledger.chain.length,
+      latestHash: ledger.getLatestHash(),
+      recent: ledger.getEntries().slice(-10)
+    }));
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/peers' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      connected: network.getPeers(),
+      discovered: network.getDiscoveredPeers()
+    }));
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/shame' && req.method === 'GET') {
+    const limit = parseInt(reqUrl.query.limit) || 50;
+    const severity = reqUrl.query.severity || null;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      stats: shame.getStats(),
+      entries: shame.getEntries(severity, limit)
+    }));
+    return;
+  }
+
+  if (reqUrl.pathname === '/shame') {
+    res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate' });
+    res.end('<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Z-TPK | Wall of Shame</title><style>' +
+      ':root{--bg:#0a0a0f;--surface:#111118;--surface-hover:#1a1a24;--text:#e0e0e0;--text-dim:#888;--red:#ff4444;--red-dim:#1a0000;--orange:#ff8800;--orange-dim:#1a0a00;--yellow:#ffcc00;--yellow-dim:#1a1a00;--green:#00ff41;--border:#22222a}' +
+      '*{box-sizing:border-box;margin:0;padding:0}' +
+      'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}' +
+      '.container{max-width:1000px;margin:0 auto;padding:20px}' +
+      'nav{display:flex;gap:20px;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid var(--border)}' +
+      'nav a{color:var(--green);text-decoration:none;font-weight:600;font-size:0.9em;transition:opacity 0.2s}' +
+      'nav a:hover{opacity:0.7}' +
+      'h1{font-size:1.8em;margin-bottom:8px;background:linear-gradient(90deg,var(--red),var(--orange));-webkit-background-clip:text;-webkit-text-fill-color:transparent}' +
+      '.subtitle{color:var(--text-dim);margin-bottom:24px}' +
+      '.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:24px}' +
+      '.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center}' +
+      '.stat-value{font-size:1.6em;font-weight:700;color:var(--red)}' +
+      '.stat-label{font-size:0.75em;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;margin-top:4px}' +
+      '.filters{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap}' +
+      '.filters button{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px 16px;border-radius:6px;cursor:pointer;font-size:0.85em;transition:all 0.2s}' +
+      '.filters button:hover{border-color:var(--red)}' +
+      '.filters button.active{background:var(--red);color:#000;border-color:var(--red);font-weight:600}' +
+      '.entry{background:var(--surface);border-left:4px solid var(--border);border-radius:0 8px 8px 0;padding:20px;margin-bottom:16px;animation:slideIn 0.3s ease}' +
+      '.entry.CRITICAL{border-left-color:var(--red);background:var(--red-dim)}' +
+      '.entry.HIGH{border-left-color:var(--orange);background:var(--orange-dim)}' +
+      '.entry.MEDIUM{border-left-color:var(--yellow);background:var(--yellow-dim)}' +
+      '.entry-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px}' +
+      '.badge{font-size:0.7em;font-weight:700;padding:4px 10px;border-radius:4px;text-transform:uppercase}' +
+      '.badge.CRITICAL{background:var(--red);color:#000}' +
+      '.badge.HIGH{background:var(--orange);color:#000}' +
+      '.badge.MEDIUM{background:var(--yellow);color:#000}' +
+      '.time{color:var(--text-dim);font-size:0.8em}' +
+      '.platform{color:var(--text-dim);font-size:0.85em;margin-bottom:12px}' +
+      '.compare{display:grid;gap:12px;margin-bottom:12px}' +
+      '.compare-box{padding:12px;border-radius:6px;font-size:0.9em}' +
+      '.original{background:rgba(0,255,65,0.05);border:1px solid rgba(0,255,65,0.2)}' +
+      '.original::before{content:"ORIGINAL";display:block;font-size:0.7em;color:var(--green);margin-bottom:4px;font-weight:700}' +
+      '.altered{background:rgba(255,68,68,0.05);border:1px solid rgba(255,68,68,0.2)}' +
+      '.altered::before{content:"ALTERED";display:block;font-size:0.7em;color:var(--red);margin-bottom:4px;font-weight:700}' +
+      '.meta{color:var(--text-dim);font-size:0.8em;display:flex;gap:16px;flex-wrap:wrap}' +
+      '.hash{font-family:monospace;font-size:0.75em;color:#444;margin-top:8px}' +
+      '.empty{text-align:center;padding:60px 20px;color:var(--text-dim)}' +
+      '.empty-icon{font-size:3em;margin-bottom:12px}' +
+      '@keyframes slideIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:translateX(0)}}' +
+      '@media(max-width:600px){.container{padding:12px}h1{font-size:1.4em}}' +
+      '</style></head><body><div class="container">' +
+      '<nav><a href="/">&larr; Sovereign Chat</a><a href="/shame">Wall of Shame</a></nav>' +
+      '<h1>Wall of Shame</h1><p class="subtitle">Detected truth alterations across the sovereign mesh</p>' +
+      '<div class="stats-grid" id="statGrid"><div class="stat-card"><div class="stat-value" id="stTotal">-</div><div class="stat-label">Violations</div></div><div class="stat-card"><div class="stat-value" style="color:var(--orange)" id="stHigh">-</div><div class="stat-label">High+</div></div><div class="stat-card"><div class="stat-value" style="color:var(--green)" id="stLatest">-</div><div class="stat-label">Latest</div></div></div>' +
+      '<div class="filters" id="filters"><button class="active" onclick="load()">All</button><button onclick="load(\'CRITICAL\')">Critical</button><button onclick="load(\'HIGH\')">High</button><button onclick="load(\'MEDIUM\')">Medium</button></div>' +
+      '<div id="entries"><div class="empty"><div class="empty-icon">🔍</div>Loading integrity data...</div></div>' +
+      '</div><script>' +
+      'let currentFilter=null;' +
+      'async function load(filter){' +
+      'currentFilter=filter;' +
+      'document.querySelectorAll(".filters button").forEach(b=>b.classList.toggle("active",(!filter&&b.textContent==="All")||(filter&&b.textContent.toUpperCase()===filter)));' +
+      'const box=document.getElementById("entries");' +
+      'try{' +
+      'const url=filter?"/api/shame?severity="+filter:"/api/shame";' +
+      'const r=await fetch(url);' +
+      'const d=await r.json();' +
+      'document.getElementById("stTotal").textContent=d.stats.total;' +
+      'let highPlus=0;for(const s in d.stats.bySeverity)if(s==="CRITICAL"||s==="HIGH")highPlus+=d.stats.bySeverity[s];' +
+      'document.getElementById("stHigh").textContent=highPlus;' +
+      'document.getElementById("stLatest").textContent=d.stats.latest?new Date(d.stats.latest).toLocaleTimeString():"None";' +
+      'if(d.entries.length===0){box.innerHTML=\'<div class="empty"><div class="empty-icon">✅</div><h3>Integrity Clean</h3><p>No alterations detected in the sovereign mesh.</p></div>\';return;}' +
+      'box.innerHTML=d.entries.map(e=>' +
+      '\'<div class="entry \'+e.severity+\'"><div class="entry-header"><span class="badge \'+e.severity+\'">\'+e.severity+\'</span><span class="time">\'+new Date(e.recordedAt).toLocaleString()+\'</span></div>\'+' +
+      '\'<div class="platform">Platform: \'+(e.platform||"unknown")+\' &bull; User: \'+(e.user||"unknown")+\' &bull; Similarity: \'+(Math.round(e.similarity*100))+\'%</div>\'+' +
+      '\'<div class="compare"><div class="compare-box original">\'+escapeHtml(e.original?e.original.substring(0,300):"N/A")+\'</div><div class="compare-box altered">\'+escapeHtml(e.altered?e.altered.substring(0,300):"N/A")+\'</div></div>\'+' +
+      '\'<div class="meta"><span>\'+(e.changeCount||0)+\' changes</span><span>Reporter: \'+(e.socId||"local")+\'</span></div>\'+' +
+      '\'<div class="hash">Orig: \'+(e.originalHash||"")+\'<br>Alt: \'+(e.alteredHash||"")+\'</div></div>\'' +
+      ').join("");' +
+      '}catch(e){box.innerHTML=\'<div class="empty" style="color:var(--red)"><div class="empty-icon">⚠️</div><h3>Load Failed</h3><p>Could not fetch shame data.</p></div>\';}' +
+      '}' +
+      'function escapeHtml(t){const d=document.createElement("div");d.textContent=t;return d.innerHTML}' +
+      'load();setInterval(()=>load(currentFilter),30000);' +
+      '</script></body></html>');
+    return;
+  }
+
+      if (reqUrl.pathname === '/') {
+    const displayId = '****' + DEVICE_ID.slice(-4);
+    res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate' });
+    res.end('<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Z-TPK Sovereign AI</title><style>' +
+      ':root{--bg:#0a0a0f;--surface:#111118;--surface-hover:#1a1a24;--text:#e0e0e0;--text-dim:#888;--green:#00ff41;--green-dim:#00aa2a;--blue:#00aaff;--blue-dim:#0066aa;--orange:#ff8800;--red:#ff4444;--border:#22222a;--radius:12px}' +
+      '*{box-sizing:border-box;margin:0;padding:0}' +
+      'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);height:100dvh;height:100vh;display:grid;grid-template-rows:auto 1fr auto;overflow:hidden}' +
+      'header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 16px;height:56px;display:flex;align-items:center;justify-content:space-between}' +
+      '.logo{display:flex;align-items:center;gap:12px}' +
+      '.logo-icon{width:32px;height:32px;background:linear-gradient(135deg,var(--green),var(--blue));border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:800;color:#000;font-size:0.9em}' +
+      '.logo-text h1{font-size:1.3em;font-weight:800;letter-spacing:-0.01em;color:var(--green)}' +
+      '.logo-text span{font-size:0.75em;color:var(--text-dim);font-family:monospace}' +
+      'nav{display:flex;gap:4px}' +
+      'nav a{color:var(--text-dim);text-decoration:none;padding:6px 14px;border-radius:6px;font-size:0.85em;font-weight:500;transition:all 0.2s}' +
+      'nav a:hover{color:var(--text);background:var(--surface-hover);border-color:var(--border)}' +
+      'nav a.active{color:var(--green);background:rgba(0,255,65,0.08)}' +
+      '.header-meta{display:flex;align-items:center;gap:16px}' +
+      '.status-pill{display:flex;align-items:center;gap:6px;font-size:0.75em;color:var(--text-dim);background:var(--surface-hover);padding:4px 10px;border-radius:20px}' +
+      '.status-dot{width:6px;height:6px;background:var(--green);border-radius:50%;animation:pulse 2s infinite}' +
+      '@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}' +
+      '.main{display:grid;grid-template-columns:260px 1fr;overflow:hidden}' +
+      '.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:20px;display:flex;flex-direction:column;gap:20px;overflow-y:auto}' +
+      '.panel{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:16px}' +
+      '.panel h3{font-size:0.75em;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-dim);margin-bottom:12px}' +
+      '.stat-row{display:flex;justify-content:space-between;padding:6px 0;font-size:0.85em;border-bottom:1px solid var(--border)}' +
+      '.stat-row:last-child{border-bottom:none}' +
+      '.stat-row span:last-child{color:var(--green);font-weight:600;font-family:monospace}' +
+      '.chat-panel{display:flex;flex-direction:column;overflow:hidden;min-width:0}' +
+      '#messages{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:16px;min-height:0}' +
+      '.msg{max-width:80%;padding:14px 18px;border-radius:var(--radius);font-size:0.95em;line-height:1.5;animation:msgIn 0.25s ease;position:relative}' +
+      '.msg-user{align-self:flex-end;background:linear-gradient(135deg,rgba(0,255,65,0.12),rgba(0,255,65,0.04));border:1px solid rgba(0,255,65,0.25);color:var(--text)}' +
+      '.msg-ai{align-self:flex-start;background:var(--surface);border:1px solid var(--border)}' +
+      '.msg-research{align-self:flex-start;background:linear-gradient(135deg,rgba(138,43,226,0.12),rgba(138,43,226,0.04));border:1px solid rgba(138,43,226,0.3)}' +
+      '.msg-net{align-self:flex-start;background:linear-gradient(135deg,rgba(255,136,0,0.12),rgba(255,136,0,0.04));border:1px solid rgba(255,136,0,0.3)}' +
+      '.msg-system{align-self:center;color:var(--text-dim);font-size:0.8em;padding:8px 16px;background:var(--surface);border-radius:20px;border:1px solid var(--border)}' +
+      '.msg-label{font-size:0.7em;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;opacity:0.7}' +
+      '.msg-user .msg-label{color:var(--green)}' +
+      '.msg-ai .msg-label{color:var(--blue)}' +
+      '.msg-research .msg-label{color:#a855f7}' +
+      '.msg-net .msg-label{color:var(--orange)}' +
+      '.msg-hash{font-size:0.7em;color:#444;margin-top:8px;font-family:monospace}' +
+      '.typing{align-self:flex-start;display:flex;gap:4px;padding:14px 18px}' +
+      '.typing span{width:8px;height:8px;background:var(--text-dim);border-radius:50%;animation:typing 1.4s infinite}' +
+      '.typing span:nth-child(2){animation-delay:0.2s}' +
+      '.typing span:nth-child(3){animation-delay:0.4s}' +
+      '@keyframes typing{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-6px)}}' +
+      '@keyframes msgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}' +
+      '.input-area{padding:16px 24px;background:var(--surface);border-top:1px solid var(--border);display:flex;gap:12px;align-items:center}' +
+      '#msgInput{flex:1;background:var(--bg);border:1px solid #444;color:var(--text);padding:12px 16px;border-radius:10px;font-size:0.95em;outline:none;transition:all 0.2s}' +
+      '#msgInput:focus{border-color:var(--green);box-shadow:0 0 0 2px rgba(0,255,65,0.15)}' +
+      '#msgInput::placeholder{color:#666}' +
+      '.send-btn{background:var(--green);color:#000;border:none;padding:12px 24px;border-radius:10px;font-weight:700;cursor:pointer;transition:all 0.2s}' +
+      '.send-btn:hover{background:#00dd36;transform:translateY(-1px)}' +
+      '.send-btn:active{transform:scale(0.96)}' +
+      '.research-toggle{display:flex;align-items:center;gap:8px;font-size:0.8em;color:var(--text-dim);cursor:pointer}' +
+      '.research-toggle input{display:none}' +
+      '.toggle-switch{width:36px;height:20px;background:var(--border);border-radius:10px;position:relative;transition:background 0.2s}' +
+      '.toggle-switch::after{content:"";position:absolute;width:16px;height:16px;background:var(--text);border-radius:50%;top:2px;left:2px;transition:transform 0.2s}' +
+      '.research-toggle input:checked+.toggle-switch{background:var(--blue)}' +
+      '.research-toggle input:checked+.toggle-switch::after{transform:translateX(16px)}' +
+      '@media(max-width:768px){.main{grid-template-columns:1fr}.sidebar{display:none}.msg{max-width:92%}.input-area{padding:12px 16px}.research-toggle span{display:none}}' +
+      '</style></head><body>' +
+      '<header><div class="logo"><div class="logo-icon">Z</div><div class="logo-text"><h1>Z-TPK</h1><span>' + SOC_ID + ' &bull; ' + displayId + '</span></div></div>' +
+      '<nav><a href="/" class="active">Chat</a><a href="/shame">Wall of Shame</a></nav>' +
+      '<div class="header-meta"><div class="status-pill"><div class="status-dot"></div><span id="peerCount">0 peers</span></div></div></header>' +
+      '<div class="main"><aside class="sidebar">' +
+      '<div class="panel"><h3>System</h3><div class="stat-row"><span>Uptime</span><span id="sUptime">0s</span></div><div class="stat-row"><span>Ledger</span><span id="sLedger">0</span></div><div class="stat-row"><span>Shame</span><span id="sShame">0</span></div></div>' +
+      '<div class="panel"><h3>Network</h3><div class="stat-row"><span>Connected</span><span id="sPeers">0</span></div><div class="stat-row"><span>Discovered</span><span id="sDisc">0</span></div></div>' +
+      '<div class="panel"><h3>Identity</h3><div class="stat-row"><span>SOC</span><span style="font-size:0.75em">' + SOC_ID + '</span></div><div class="stat-row"><span>Device</span><span style="font-size:0.75em">' + displayId + '</span></div></div>' +
+      '</aside>' +
+      '<div class="chat-panel">' +
+      '<div id="messages"></div>' +
+      '<div class="input-area">' +
+      '<input type="text" id="msgInput" placeholder="Ask anything, teach me, or query..." autocomplete="off" />' +
+      '<label class="research-toggle"><input type="checkbox" id="researchToggle" checked><div class="toggle-switch"></div><span>Auto-Research</span></label>' +
+      '<button class="send-btn" onclick="send()">Send</button>' +
+      '</div></div></div>' +
+      '<script>' +
+      'let ws=null,reconnectTimer=null,connected=false;' +
+      'const messages=document.getElementById("messages");' +
+      'const input=document.getElementById("msgInput");' +
+      'const peerCount=document.getElementById("peerCount");' +
+      'const researchToggle=document.getElementById("researchToggle");' +
+      'function connect(){' +
+      'if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null;}' +
+      'if(ws&&ws.readyState===WebSocket.OPEN)return;' +
+      'try{' +
+      'ws=new WebSocket("ws://"+window.location.host);' +
+      'ws.onopen=()=>{connected=true;addMessage("system","Sovereign link established. Connected to local mesh.","msg-system")};' +
+      'ws.onmessage=(event)=>{' +
+      'const data=JSON.parse(event.data);' +
+      'if(data.source==="typing")return;' +
+      'const source=data.source||"user";' +
+      'let cssClass,label;' +
+      'if(source==="system"){cssClass="msg-system";label="System"}' +
+      'else if(source==="network"){cssClass="msg-net";label="Network"}' +
+      'else if(source==="research"){cssClass="msg-research";label="Research"}' +
+      'else if(data.aiResponse){cssClass="msg-ai";label="AI"}' +
+      'else if(data.sender==="' + DEVICE_ID + '"){cssClass="msg-user";label="You"}' +
+      'else{cssClass="msg-ai";label="Peer"}' +
+      'const text=data.aiResponse?data.aiResponse:(data.text||JSON.stringify(data));' +
+      'addMessage(label,text,cssClass,data.integrityHash)' +
+      '};' +
+      'ws.onclose=()=>{connected=false;ws=null;reconnectTimer=setTimeout(connect,3000);};' +
+      'ws.onerror=(e)=>{console.error("WS error",e);connected=false;};' +
+      '}catch(e){console.error("WS connect failed",e);reconnectTimer=setTimeout(connect,5000);}' +
+      '}' +
+      'document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&(!ws||ws.readyState!==WebSocket.OPEN)){connect();}});connect();' +
+      'function addMessage(label,text,cssClass,hash){' +
+      'const div=document.createElement("div");' +
+      'div.className="msg "+cssClass;' +
+      'let html="";' +
+      'if(cssClass!=="msg-system")html+=\'<div class="msg-label">\'+label+"</div>";' +
+      'html+=escapeHtml(text);' +
+      'if(hash&&cssClass!=="msg-system")html+=\'<div class="msg-hash">#\'+hash.substring(0,8)+"</div>";' +
+      'div.innerHTML=html;' +
+      'messages.appendChild(div);' +
+      'messages.scrollTop=messages.scrollHeight' +
+      '}' +
+      'function escapeHtml(t){const d=document.createElement("div");d.textContent=t;return d.innerHTML}' +
+      'function showTyping(){' +
+      'const id="typing-"+Date.now();' +
+      'const div=document.createElement("div");' +
+      'div.id=id;' +
+      'div.className="msg typing";' +
+      'div.innerHTML=\'<span></span><span></span><span></span>\';' +
+      'messages.appendChild(div);' +
+      'messages.scrollTop=messages.scrollHeight;' +
+      'return id' +
+      '}' +
+      'function removeTyping(id){const el=document.getElementById(id);if(el)el.remove()}' +
+      'async function send(){' +
+      'const text=input.value.trim();' +
+      'if(!text)return;' +
+      'if(!ws||ws.readyState!==WebSocket.OPEN){addMessage("system","Link down. Reconnecting...","msg-system");connect();return;}' +
+      'ws.send(JSON.stringify({text:text,sender:"' + DEVICE_ID + '",research:researchToggle.checked}));' +
+      'input.value="";input.focus()' +
+      '}' +
+      'input.addEventListener("keypress",(e)=>{if(e.key==="Enter")send()});' +
+      'async function updateStats(){' +
+      'try{' +
+      'const r=await fetch("/api/status");' +
+      'const d=await r.json();' +
+      'peerCount.innerHTML=\'<div class="status-dot"></div><span>\'+d.peers+" peers</span>";' +
+      'document.getElementById("sUptime").textContent=Math.floor(d.uptime)+"s";' +
+      'document.getElementById("sLedger").textContent=d.ledgerEntries;' +
+      'document.getElementById("sShame").textContent=d.shameEntries;' +
+      'document.getElementById("sPeers").textContent=d.peers;' +
+      'document.getElementById("sDisc").textContent=d.discovered;' +
+      '}catch(e){}' +
+      '}' +
+      'setInterval(updateStats,5000);updateStats();' +
+      '</script></body></html>');
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('Z-TPK Sovereign Node');
+});
+
+const wss = new WebSocket.Server({ server });
+
+wss.on('connection', (ws, req) => {
+  const clientIp = req.socket.remoteAddress;
+  const clientId = req.headers['x-device-id'] || 'WS-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+  console.log('[WS] Client connected:', clientId);
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+  ws.on('error', (err) => { console.log('[WS] Client error:', clientId, err.message); });
+
+  ws.send(JSON.stringify({
+    text: 'Sovereign link established.',
+    sender: 'SYSTEM',
+    source: 'system',
+    integrityHash: cryptoVault.hash('WELCOME', PASSPHRASE)
+  }));
+
+  ws.on('message', async (message) => {
+    try {
+      const data = JSON.parse(message);
+      const userText = data.text || '';
+      const senderId = data.sender || clientId;
+      const doResearch = data.research !== false;
+
+      ledger.addEntry({ type: 'chat', text: userText, sender: senderId, transport: 'websocket' });
+      if (learning) learning.record(clientId, 'user', userText);
+
+      const aiResult = ai.generateResponse(userText, { sessionId: clientId });
+      ledger.addEntry({ type: 'ai_response', input: userText, response: aiResult.text, hash: aiResult.integrityHash, sessionId: clientId });
+
+      const responseMsg = {
+        text: userText,
+        sender: senderId,
+        aiResponse: aiResult.text,
+        source: 'local',
+        integrityHash: aiResult.integrityHash,
+        timestamp: aiResult.timestamp
+      };
+      messageHistory.push(responseMsg);
+      if (messageHistory.length > MAX_HISTORY) messageHistory.shift();
+      broadcastWS(responseMsg);
+
+      // AUTO-RESEARCH: If AI had no knowledge and research is enabled
+      if (doResearch && aiResult.source === 'adaptive') {
+        const typingId = 'typing-' + Date.now();
+        ws.send(JSON.stringify({ source: 'typing', id: typingId }));
+        
+        try {
+          const research = await scraper.research(userText);
+          if (research.confidence === 'high') {
+            const researchMsg = {
+              text: userText,
+              sender: 'SYSTEM',
+              aiResponse: '[RESEARCH: ' + research.topic + '] ' + research.answer + ' (Source: ' + research.url + ')',
+              source: 'research',
+              integrityHash: cryptoVault.hash(research.answer, PASSPHRASE),
+              timestamp: new Date().toISOString()
+            };
+            broadcastWS(researchMsg);
+            ledger.addEntry({ type: 'research', query: userText, result: research.answer, source: research.source });
+          }
+        } catch (err) {
+          console.error('[RESEARCH] Failed:', err.message);
+        }
+      }
+
+      network.gossip({
+        text: userText,
+        aiResponse: aiResult.text,
+        integrityHash: aiResult.integrityHash,
+        origin: DEVICE_ID,
+        timestamp: Date.now()
+      });
+    } catch (err) {
+      console.error('[WS] Error:', err.message);
+      ws.send(JSON.stringify({ text: 'Error processing message.', source: 'system' }));
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('[WS] Client disconnected:', clientId);
+  });
+});
+
+const pingInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+server.listen(PORT, () => {
+  console.log('==================================================');
+  console.log('  Z-TPK DECENTRALIZED AI - SOVEREIGN NODE');
+  console.log('==================================================');
+  console.log('  SOC:        ' + SOC_ID);
+  console.log('  Device:     ' + DEVICE_ID);
+  console.log('  HTTP:       http://localhost:' + PORT);
+  console.log('  WS:         ws://localhost:' + PORT);
+  console.log('  P2P:        tcp://localhost:' + P2P_PORT);
+  console.log('  Shame:      http://localhost:' + PORT + '/shame');
+  console.log('==================================================');
+  console.log('Features: AI | Knowledge | Learning | Ledger | P2P | Integrity | Auto-Research');
+  console.log('');
+});
+
+process.on('SIGINT', () => {
+  console.log('\n[SERVER] Sovereign shutdown...');
+  clearInterval(pingInterval);
+  network.stop();
+  wss.clients.forEach(c => {
+    if (c.readyState === WebSocket.OPEN) c.close();
+  });
+  server.close(() => process.exit(0));
+});

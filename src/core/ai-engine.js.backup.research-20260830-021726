@@ -1,0 +1,276 @@
+const crypto = require('crypto');
+const KnowledgeBase = require('./knowledge');
+const WebScraper = require('./web-scraper');
+
+class AIEngine {
+  constructor(config = {}) {
+    this.socId = config.socId || process.env.SOC_ID || 'SOC-UNKNOWN';
+    this.deviceId = config.deviceId || process.env.DEVICE_ID || 'UNKNOWN';
+    this.passphrase = config.passphrase || process.env.APP_PASSPHRASE || 'CHANGE_ME';
+    
+    this.integrityHash = crypto.createHash('sha256')
+      .update(this.socId + this.deviceId + this.passphrase)
+      .digest('hex');
+
+    this.sessions = new Map();
+    this.capabilities = [
+      { name: 'Sovereign Chat', desc: 'Real-time websocket messaging with integrity hashing' },
+      { name: 'Knowledge Base', desc: 'Pre-loaded facts on physics, space, crypto, history, code, math' },
+      { name: 'Adaptive Learning', desc: 'Learns from user corrections and remembered facts' },
+      { name: 'Reasoning Chain', desc: 'Multi-step logic synthesis for complex queries' },
+      { name: 'Secure Ledger', desc: 'Immutable blockchain-style record of all interactions' },
+      { name: 'P2P Mesh Network', desc: 'Gossip protocol for decentralized peer communication' },
+      { name: 'Truth Ossifier', desc: 'Detects and logs text alteration attempts' },
+      { name: 'Wall of Shame', desc: 'Public integrity violation tracker at /shame' },
+      { name: 'Auto-Research', desc: 'Web scraping when local knowledge is insufficient' },
+      { name: 'SOC Endpoint', desc: 'HMAC-verified secure reporting with replay protection' },
+      { name: 'Session Memory', desc: 'Per-client conversation history (50 turns)' },
+      { name: 'GitHub Sync', desc: 'Optional integrity report mirroring to repositories' },
+      { name: 'Alert Service', desc: 'Discord webhook notifications for critical events' }
+    ];
+    this.patterns = new Map();
+    this.knowledge = new KnowledgeBase();
+this.scraper = config.scraper || new WebScraper();
+    this.learning = config.learningEngine || null; // Injected
+    
+    this._registerDefaultPatterns();
+  }
+
+  deterministicHash(input, salt = '') {
+    return crypto.createHash('sha256')
+      .update(this.integrityHash + String(input) + String(salt))
+      .digest('hex');
+  }
+
+  _registerDefaultPatterns() {
+    const self = this;
+    
+    this.registerPattern('greeting', /^(hello|hi|hey|greetings|sup|yo)\b/i, () => {
+      return `Greetings. I am Z-TPK AI operating under sovereign logic on ${self.deviceId}.`;
+    });
+
+    this.registerPattern('farewell', /^(bye|goodbye|see ya|later|exit|quit)\b/i, () => {
+      return 'Session preserved. State maintained. Sovereign link closed.';
+    });
+
+    this.registerPattern('identity', /^(who are you|what are you|identify yourself|what is z-tpk)\b/i, () => {
+      const caps = self.capabilities.map(c => c.name).join(' | ');
+      return `I am Z-TPK AI, sovereign node ${self.socId} operating on ${self.deviceId}. I am a deterministic AI core with ${self.capabilities.length} integrated systems.\n\nCore directive: Preserve truth, learn continuously, and maintain mesh integrity.\n\nActive modules: ${caps}`;
+    });
+
+    this.registerPattern('help', /^(help|commands|what can you do|\?)\b/i, () => {
+      const caps = self.capabilities.map((c, i) => `[${i+1}] ${c.name}: ${c.desc}`).join('\n');
+      return `Z-TPK COMMAND INTERFACE\n======================\n\nDirect commands:\n  hello / hi / greetings\n  status / info / system\n  who are you / identify yourself\n  what do you know / topics\n  my stats / profile\n  clear memory / forget / reset session\n  help / commands / ?\n\nTeaching mode:\n  "remember that [topic] is [fact]"\n  "no, [correction]"\n  "teach me about [topic]"\n\nIntegrated systems (${self.capabilities.length}):\n${caps}`;
+    });
+
+    this.registerPattern('status', /^(status|info|system|state)\b/i, () => {
+      const learnStats = self.learning ? ` | Learned facts: ${self.learning.learnedFacts.length}` : '';
+      return `System: ${self.socId} | Device: ${self.deviceId} | Uptime: ${process.uptime()}s | Sessions: ${self.sessions.size} | Knowledge topics: ${self.knowledge.listTopics().length}${learnStats}`;
+    });
+
+    this.registerPattern('clear', /^(clear memory|forget|reset session)\b/i, (input, ctx) => {
+      if (ctx.sessionId) self.sessions.delete(ctx.sessionId);
+      return 'Session memory cleared. Fresh state established.';
+    });
+
+    this.registerPattern('math', /^([0-9+\-*/().\s]+)$/, (input) => {
+      try {
+        const sanitized = input.replace(/[^0-9+\-*/().\s]/g, '');
+        const result = Function('"use strict"; return (' + sanitized + ')')();
+        return `CALCULATION: ${sanitized} = ${result}`;
+      } catch {
+        return null;
+      }
+    });
+
+    this.registerPattern('topics', /^(what do you know|topics|knowledge)\b/i, () => {
+      const base = self.knowledge.listTopics();
+      const learned = self.learning ? [...new Set(self.learning.learnedFacts.map(f => f.topic))] : [];
+      const all = [...new Set([...base, ...learned])];
+      return `I have knowledge on: ${all.join(', ')}. Ask me anything or teach me new facts.`;
+    });
+
+    this.registerPattern('capabilities', /^(capabilities|modules|systems|features|what do you have)\b/i, () => {
+      const caps = self.capabilities.map((c, i) => `\n  ${i+1}. ${c.name}\n     -> ${c.desc}`).join('');
+      return `SOVEREIGN NODE CAPABILITIES\n============================\nNode: ${self.socId}\nDevice: ${self.deviceId}\nTotal systems: ${self.capabilities.length}\n\nRegistered modules:${caps}`;
+    });
+
+    this.registerPattern('stats', /^(my stats|profile|who am i)\b/i, (input, ctx) => {
+      if (!self.learning) return 'Learning module not active.';
+      const s = self.learning.getStats(ctx.sessionId);
+      return `Your profile: ${s.messages} messages | Avg length: ${s.avgLength} | Tech depth: ${s.technicalDepth}/10 | Formality: ${s.formality}/10 | Facts learned together: ${s.learnedFacts}`;
+    });
+  }
+
+  registerPattern(name, regex, handler) {
+    this.patterns.set(name, { regex, handler, priority: this.patterns.size });
+  }
+
+  async generateResponse(input, context = {}) {
+    const sessionId = context.sessionId || 'global';
+    const normalized = input.trim();
+
+    this._addToSession(sessionId, 'user', normalized);
+
+    // 1. Check if user is teaching us
+    if (this.learning) {
+      const teaching = this.learning.detectTeaching(normalized);
+      if (teaching) {
+        const response = this._handleTeaching(teaching, normalized, sessionId);
+        if (response) return this._wrapAndRecord(response, normalized, sessionId, 'learning');
+      }
+    }
+
+    // 2. Try pattern matching
+    for (const [name, pattern] of this.patterns) {
+      if (pattern.regex.test(normalized)) {
+        const response = pattern.handler(normalized, context);
+        if (response) {
+          let text = response;
+          if (this.learning) text = this.learning.adaptStyle(sessionId, text);
+          return this._wrapAndRecord(text, normalized, sessionId, 'pattern');
+        }
+      }
+    }
+
+    // 3. Internal reasoning remains available for diagnostics, but raw
+    // learned facts and chain formatting must never be emitted as normal chat.
+    const diagnosticReasoning = context.diagnosticReasoning === true && this.learning
+      ? this.learning.reason(normalized, this.knowledge)
+      : null;
+    if (diagnosticReasoning) {
+      return this._wrapAndRecord(
+        diagnosticReasoning.reasoning,
+        normalized,
+        sessionId,
+        'diagnostic-reasoning'
+      );
+    }
+
+    // 4. Try knowledge base
+    const knowledge = this.knowledge.getAnswer(normalized);
+    if (knowledge) {
+      let text = `[${knowledge.topic.toUpperCase()}] ${knowledge.answer}`;
+      if (this.learning) text = this.learning.adaptStyle(sessionId, text);
+      return this._wrapAndRecord(text, normalized, sessionId, 'knowledge');
+    }
+
+    // 5. Try learned facts
+    if (this.learning) {
+      const learned = this.learning.searchLearned(normalized);
+      if (learned) {
+        learned.recallCount = (learned.recallCount || 0) + 1;
+        const text = `[LEARNED: ${learned.topic.toUpperCase()}] ${learned.fact}`;
+        return this._wrapAndRecord(text, normalized, sessionId, 'learned');
+      }
+    }
+
+    // 6. Context-aware fallback
+    const fallback = this._contextualFallback(normalized, sessionId);
+    return this._wrapAndRecord(fallback, normalized, sessionId, 'adaptive');
+  }
+
+  _handleTeaching(teaching, input, sessionId) {
+    const { type, match } = teaching;
+    
+    if (type === 'fact') {
+      const topic = match[2].trim();
+      const fact = match[3].trim();
+      this.learning.learnFact(topic, fact, 'user');
+      return `LEARNED: "${topic}" → "${fact}". Stored in sovereign memory. I will recall this in future sessions.`;
+    }
+    
+    if (type === 'raw') {
+      const raw = match[2].trim();
+      this.learning.learnFact('general', raw, 'user');
+      return `LEARNED: "${raw}". Stored in general knowledge.`;
+    }
+    
+    if (type === 'correction') {
+      const correction = match[1].trim();
+      this.learning.recordCorrection('last_response', correction, sessionId);
+      return `CORRECTION LOGGED: "${correction}". I will prioritize this in future reasoning.`;
+    }
+    
+    if (type === 'correction_trigger') {
+      return 'Acknowledged. Please provide the correct information and I will log it.';
+    }
+    
+    if (type === 'teach_request') {
+      const topic = match[1].trim();
+      const kb = this.knowledge.findRelevant(topic);
+      if (kb) {
+        return `TEACHING: ${topic}\n${kb.facts[0]}\n\nAsk follow-up questions to deepen your understanding.`;
+      }
+      return `I don't have data on "${topic}" yet. Teach me: "remember that ${topic} is [fact]"`;
+    }
+    
+    return null;
+  }
+
+  _contextualFallback(input) {
+    const inputHash = this.deterministicHash(input);
+    const seed = parseInt(inputHash.substring(0, 8), 16);
+    
+    // Check if we've seen similar queries before
+    let contextHint = '';
+    if (this.learning && this.learning.conversations.length > 10) {
+      contextHint = ' I am building a model of your interests from our conversation history.';
+    }
+
+    const responses = [
+      `ANALYSIS [${inputHash.substring(0, 6)}]: Novel input detected. I'm expanding my knowledge graph to accommodate this.${contextHint}`,
+      `QUERY: "${input}" — No direct match in my current knowledge base. You can teach me: "remember that [topic] is [fact]"`,
+      `THINKING: ${input} — This falls outside my current training set. My learning engine is recording this gap.${contextHint}`,
+      `RESPONSE [${inputHash.substring(0, 6)}]: I don't have specific data on "${input}" yet. Try asking about quantum physics, black holes, programming, or cryptography. Or teach me directly.`
+    ];
+
+    return responses[seed % responses.length];
+  }
+
+  _wrapAndRecord(text, input, sessionId, source) {
+    const result = {
+      text: text,
+      input: input,
+      sessionId: sessionId,
+      source: source,
+      integrityHash: this.deterministicHash(input + text),
+      timestamp: new Date().toISOString()
+    };
+    
+    this._addToSession(sessionId, 'ai', text);
+    
+    if (this.learning) {
+      this.learning.record(sessionId, 'ai', text, { source });
+    }
+    
+    return result;
+  }
+
+  _addToSession(sessionId, role, text) {
+    if (!this.sessions.has(sessionId)) {
+      this.sessions.set(sessionId, []);
+    }
+    const history = this.sessions.get(sessionId);
+    history.push({ role, text, timestamp: Date.now() });
+    if (history.length > 50) history.shift();
+  }
+
+  getSessionHistory(sessionId) {
+    return this.sessions.get(sessionId) || [];
+  }
+
+  getAllSessions() {
+    const result = {};
+    for (const [id, history] of this.sessions) {
+      result[id] = history.length;
+    }
+    return result;
+  }
+
+  async callTool(toolName, params) {
+    return { tool: toolName, params, status: 'not_implemented' };
+  }
+}
+
+module.exports = AIEngine;

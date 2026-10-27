@@ -1,0 +1,9 @@
+[32mhledger[0m/stable 1.52.1 aarch64
+  Robust, friendly, fast plain text accounting software. (CLI only)
+
+[32mhledger-ui[0m/stable 1.52.1 aarch64
+  hledger-ui - terminal interface (TUI) for hledger, a robust, friendly plain text accounting app.
+
+[32mledger[0m/stable 3.4.1-2 aarch64
+  Powerful, double-entry accounting system
+
